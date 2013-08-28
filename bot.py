@@ -1,100 +1,187 @@
-import sys
-import socket
+# Twisted imports
+from twisted.words.protocols import irc
+from twisted.internet import reactor, protocol
+from twisted.python import log
+
+# BeautifulSoup import
+from BeautifulSoup import BeautifulSoup
+
+# System imports
 import time
-
-bnick = 'BOT_NICK'
-debug = True
-network = 'NETWORK'
-port = 6667
-bpass = 'PASSWORD'
-admins = ['ADMIN','ADMIN_2']
-trigchar = '.'
-owner = ['OWNER','OTHEROWNER']
-
-if debug == True:
-	chan = '#dev-channel'
-elif debug == False:
-	chan = '#main-channel'
+import sys
+from config import Config
+import re
+import urllib2
 
 
-def get_nick(hln):
-	data = hln.split() [0]
-	return data[(data.find(":")+1):(data.find("!"))]
-	
-def isop(nick):
-	if nick in admins:
-		return 1
-	else: 
-		return 0
-		
-def get_chan(str):
-	return str[(str.find("#")):].split() [0]
+bot_config = {'nick':'Python',
+'network':'irc.network.com',
+'port':6667,
+'passwd':'P@ssw0rd',
+'owner':['OWNER1','OWN_2],
+'db':'data.db'
+}
 
-def isown(nick):
-	if nick in owner:
-		return 1
-	else:
-		return 0
-	
-def get_args(arg, cmd):
-	return arg[(arg.find(cmd)) +len(cmd)+1:]
+conf_file = "bot.cfg"
 
-irc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-irc.connect((network, port))
+exp = re.compile('(http|ftp|https):\/\/([\w\-_]+(?:(?:\.[\w\-_]+)+))([\w\-\.,@?^=%&amp;:/~\+#]*[\w\-\@?^=%&amp;/~\+#])?')
 
-print irc.recv (4096)
+######
 
-irc.send('NICK ' + bnick + '\r\n')
-irc.send('USER '+ bnick + ' 0 * :' + bnick + '\r\n')
+class bot(irc.IRCClient): 
+    
+    def __init__(self, config):
+        self.config = Config(conf_file)
+        self.channels = self.config.core.get_list('active_channels')
+        self.nickname = self.config.core.nick
+        self.admins = self.config.core.get_list('admins')
+        self.top = self.config.core.topic
+        self.stat = self.config.core.status
+    
+    """A basic IRC bot."""
+    
+    def get_url(self, str):
+        m = exp.search(str)
+        if m is not None:
+            return str[m.start():m.end()]
+        else:
+            return None
+            
+    def get_title(self, str):       
+        try:
+            source = urllib2.urlopen(str)
+        except urllib2.HTTPError, e:
+            print "ERROR: "e.code
+            return None
+        else:
+            headers = source.info().headers
+            if not any('image' in s for s in headers):
+                bs = BeautifulSoup(source)
+                return bs.title.string
+        
+    def noticed(self, user, chan, msg):
+        user = user.split('!', 1)[0]
+        if user == "NickServ" and "This nickname is registered" in msg:
+            msg = "identify "+self.config.core.passwd
+            print "Identifying..."
+            self.msg(user, msg)
+        if user == "NickServ":
+            if "now identified" in msg or "Password accepted" in msg:
+                print "Identified to nickserv"
 
-while True:
+    def userJoined(self, user, chan):
+        user = user.split('!', 1)[0]
+        if user not in self.admins:
+            self.mode(chan, True, '+v', None, user, None)
+            
+    def signedOn(self):
+        for chan in self.channels:
+            self.join(chan)
 
-	data = irc.recv ( 4096 )
-	print data
+    def joined(self, channel):
+        if channel not in self.channels:
+            self.channels.append(channel)
+            self.config.parser.set('core','active_channels',','.join(self.channels))
+            self.config.save()
+        
+    def left(self, channel):
+        if channel in self.channels:
+            self.channels.remove(channel)
+            self.config.parser.set('core','active_channels',','.join(self.channels))
+            self.config.save()
+        
+    def privmsg(self, user, channel, msg):
+        chan = channel[1:]
+        user = user.split('!', 1)[0]
+        cmd = msg.split(' ', 1)[0]
+        arg = {}
+        url = self.get_url(msg)
+        if url is not None:
+            title = self.get_title(url)
+            if title is not None:
+                self.msg(channel, "Title: "+str(title))
+        
+        if len(msg.split()) > 1:
+            msg = ' '.join(msg.split()[1:])
+            for i in range(len(msg.split())):
+                arg[i+1] = msg.split()[i]
 
-	if data.find ( 'PING' ) != -1:
-		irc.send ( 'PONG ' + data.split() [ 1 ] + '\r\n' )
+        if cmd == self.config.core.char+'die':
+            if user in bot_config['owner']:
+                self.quit()
+                reactor.stop()
+                
+        if cmd == self.config.core.char+'join':
+            if user in self.admins:
+                if arg[1] not in self.channels:
+                    self.join(arg[1])
+                else:
+                    self.msg(channel, "I'm already in that channel")
+                
+        if cmd == self.config.core.char+'part':
+            if user in self.admins:
+                if arg[1] in self.channels:
+                    self.leave(arg[1])
+                else:
+                    self.msg(channel,"I'm not in that channel")
+        
+        if cmd == self.config.core.char+'channels':
+            self.msg(channel, "Current channels: "+', '.join(self.channels))
+        
+        if cmd == self.config.core.char+'admin':
+            if arg[1] == 'add':
+                if arg[2] not in self.admins:
+                    self.admins.append(arg[2])
+                    self.config.parser.set('core','admins',','.join(self.admins))
+                    self.config.save()
+                    print "Added "+arg[2]+" to the admin list"
+            
+            elif arg[1] == 'del':
+                if arg[2] in self.admins:
+                    self.admins.remove(args[2])
+                    self.config.parser.set('core','admins',','.join(self.admins))
+                    self.config.save()
+                    print "Removed "+arg[2]+" from the admin list"
+            
+            elif arg[1] == 'list':
+                self.msg(channel, "Current admins: "+', '.join(self.admins))
+                
+        if cmd == self.config.core.char+'topic':
+            if user in self.admins:
+                self.top = msg
+                self.config.parser.set('core','topic',self.top)
+                self.topic(channel, self.top+' || '+self.stat)
+                self.config.save()
+                
+        if cmd == self.config.core.char+'status':
+            if user in self.admins:
+                self.stat = msg
+                self.config.parser.set('core','status',self.stat)
+                self.topic(channel, self.top+' || '+self.stat)
+                self.config.save()
+                
+class botFactory(protocol.ClientFactory):
+    global conf_file
+    
+    def __init__(self):
+        self.config = Config(conf_file)
+    
+    def buildProtocol(self, addr):
+        p = bot(self.config)
+        p.factory = self
+        return p
 
-	elif data.find (trigchar + 'die') != -1:
-		if isop(get_nick(data)) == 1:
-			irc.send ( 'PRIVMSG '+get_chan(data)+' :Shutting down...\r\n' )
-			irc.send ( 'QUIT :Disconnecting...\r\n')
-			break
-		else:
-			irc.send ( 'PRIVMSG #bots : You are not an Op.\r\n' )
-
-	elif data.find ( 'JOIN :#' ) != -1:
-		if get_nick(data) != bnick:
-			if isop(get_nick(data)) == 0:
-				irc.send ( 'MODE #bots +v ' + get_nick(data) + '\r\n' )
-			else:
-				irc.send ( 'PRIVMSG #bots :Shhh! Its an admin.... :P\r\n' )
-
-	elif data.find (trigchar + 'topic') != -1:
-		if get_nick(data) != bnick:
-			if isop(get_nick(data)) == 1:
-				top = get_args(data, trigchar+'topic')
-				irc.send ('TOPIC ' + chan + ' :' + top + '\r\n')
-
-	elif data.find (trigchar+'join') != -1:
-		if get_nick(data) !=bnick:
-			if isown(get_nick(data)) == 1:
-				chan = get_args(data, trigchar+'join')
-				irc.send ('JOIN '+chan+'\r\n')
-
-	elif data.find (trigchar+'part') != -1:
-		if get_nick(data) != bnick:
-			if isown(get_nick(data)) == 1:
-				if  len(get_args(data, trigchar+'part'))  > 1:
-					chan = get_args(data, trigchar+'part')
-					irc.send ('PART '+chan+'\r\n')
-				else:
-					irc.send ('PART '+get_chan(data)+'\r\n')
-				
-	elif data.find ('This nickname is registered') != -1:
-		if get_nick(data) != bnick:
-			if get_nick(data) == 'NickServ':
-				irc.send ('PRIVMSG NickServ :identify '+bpass+'\r\n')
-
-	elif data.find ('Password accepted - you are now recognized') != -1:
-		irc.send ('JOIN ' + chan + '\r\n')
+    def clientConnectionLost(self, connector, reason):
+        connector.connect()
+    
+    def clientConnectionFailed(self, connector, reason):
+        print "connection failed:", reason
+        reactor.stop()
+                
+if __name__ == '__main__':
+    
+    f = botFactory()
+        
+    reactor.connectTCP(bot_config['network'], bot_config['port'], f)
+    
+    reactor.run()

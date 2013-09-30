@@ -3,27 +3,25 @@ from twisted.words.protocols import irc
 from twisted.internet import reactor, protocol
 from twisted.python import log
 
+
 # BeautifulSoup import
 from BeautifulSoup import BeautifulSoup
+
+# Bot imports
+import url
+from config import Config
+from calc import calc
 
 # System imports
 import time
 import sys
-from config import Config
 import re
 import urllib2
 
-
-bot_config = {'nick':'Python',
-'network':'irc.network.com',
-'port':6667,
-'passwd':'P@ssw0rd',
-'owner':['OWNER1','OWN_2],
-'db':'data.db'
-}
-
 conf_file = "bot.cfg"
-
+version = '0.3'
+network = 'irc.nuxxor.com'
+port = 6667
 exp = re.compile('(http|ftp|https):\/\/([\w\-_]+(?:(?:\.[\w\-_]+)+))([\w\-\.,@?^=%&amp;:/~\+#]*[\w\-\@?^=%&amp;/~\+#])?')
 
 ######
@@ -31,33 +29,36 @@ exp = re.compile('(http|ftp|https):\/\/([\w\-_]+(?:(?:\.[\w\-_]+)+))([\w\-\.,@?^
 class bot(irc.IRCClient): 
     
     def __init__(self, config):
+        self.url = url
         self.config = Config(conf_file)
         self.channels = self.config.core.get_list('active_channels')
+        self.network = self.config.core.network
+        self.port = self.config.core.port
         self.nickname = self.config.core.nick
         self.admins = self.config.core.get_list('admins')
+        self.owner = self.config.core.owner
         self.top = self.config.core.topic
         self.stat = self.config.core.status
+        self.starttime = time.time()
+        self.version = version
+	self.calc = calc
+     ##   self.twchan = "#besttechie"
     
     """A basic IRC bot."""
-    
-    def get_url(self, str):
-        m = exp.search(str)
-        if m is not None:
-            return str[m.start():m.end()]
-        else:
-            return None
-            
-    def get_title(self, str):       
-        try:
-            source = urllib2.urlopen(str)
-        except urllib2.HTTPError, e:
-            print "ERROR: "e.code
-            return None
-        else:
-            headers = source.info().headers
-            if not any('image' in s for s in headers):
-                bs = BeautifulSoup(source)
-                return bs.title.string
+                
+    def get_uptime(self):
+        curtime = time.time()
+        uptime = curtime - self.starttime
+        week = int(uptime / 604800)
+        uptime = uptime - week * 604800
+        day = int(uptime / 86400)
+        uptime = uptime - day * 86400
+        hour = int(uptime / 3600)
+        uptime = uptime - hour * 3600
+        minute = int(uptime / 60)
+        uptime = uptime - minute * 60
+        second = int(uptime)
+        return "I have been running for: "+str(week)+" week(s) "+str(day)+" day(s) "+str(hour)+" hour(s) "+str(minute)+" minute(s) "+str(second)+" second(s)"
         
     def noticed(self, user, chan, msg):
         user = user.split('!', 1)[0]
@@ -95,9 +96,10 @@ class bot(irc.IRCClient):
         user = user.split('!', 1)[0]
         cmd = msg.split(' ', 1)[0]
         arg = {}
-        url = self.get_url(msg)
+        url = self.url.get_url(msg)
+        
         if url is not None:
-            title = self.get_title(url)
+            title = self.url.get_title(url)
             if title is not None:
                 self.msg(channel, "Title: "+str(title))
         
@@ -105,11 +107,15 @@ class bot(irc.IRCClient):
             msg = ' '.join(msg.split()[1:])
             for i in range(len(msg.split())):
                 arg[i+1] = msg.split()[i]
+        
+        if cmd == self.config.core.char+'version':
+            self.msg(channel, "I'm currently running version "+str(version))
 
         if cmd == self.config.core.char+'die':
-            if user in bot_config['owner']:
+            if user in self.owner:
                 self.quit()
                 reactor.stop()
+               ## twitss.threading.Timer.cancel()
                 
         if cmd == self.config.core.char+'join':
             if user in self.admins:
@@ -138,7 +144,7 @@ class bot(irc.IRCClient):
             
             elif arg[1] == 'del':
                 if arg[2] in self.admins:
-                    self.admins.remove(args[2])
+                    self.admins.remove(arg[2])
                     self.config.parser.set('core','admins',','.join(self.admins))
                     self.config.save()
                     print "Removed "+arg[2]+" from the admin list"
@@ -160,6 +166,13 @@ class bot(irc.IRCClient):
                 self.topic(channel, self.top+' || '+self.stat)
                 self.config.save()
                 
+        if cmd == self.config.core.char+'uptime':
+            self.msg(channel, str(self.get_uptime()))
+
+        if cmd == self.config.core.char+'calc':
+            self.msg(channel, str(self.calc(msg)))
+
+                
 class botFactory(protocol.ClientFactory):
     global conf_file
     
@@ -172,6 +185,7 @@ class botFactory(protocol.ClientFactory):
         return p
 
     def clientConnectionLost(self, connector, reason):
+        print "Connection lost. Reconnecting..."
         connector.connect()
     
     def clientConnectionFailed(self, connector, reason):
@@ -180,8 +194,11 @@ class botFactory(protocol.ClientFactory):
                 
 if __name__ == '__main__':
     
+    print "Starting Pybot Version: "+str(version)
     f = botFactory()
         
-    reactor.connectTCP(bot_config['network'], bot_config['port'], f)
+    reactor.connectTCP(network, port, f)
+    
+    print "Connecting..."
     
     reactor.run()
